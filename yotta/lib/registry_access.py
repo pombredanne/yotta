@@ -31,17 +31,15 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
 # settings, , load and save settings, internal
-import settings
+from yotta.lib import settings
 # access_common, , things shared between different component access modules, internal
-import access_common
+from yotta.lib import access_common
 # Ordered JSON, , read & write json, internal
-import ordered_json
+from yotta.lib import ordered_json
 # export key, , export pycrypto keys, internal
-import exportkey
-# auth, , authenticate users, internal
-import auth
+from yotta.lib import exportkey
 # globalconf, share global arguments between modules, internal
-import yotta.lib.globalconf as globalconf
+from yotta.lib import globalconf
 
 Registry_Base_URL = 'https://registry.yottabuild.org'
 Website_Base_URL  = 'https://yotta.mbed.com'
@@ -142,6 +140,8 @@ def _handleAuth(fn):
     ''' Decorator to re-try API calls after asking the user for authentication. '''
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
+        # auth, , authenticate users, internal
+        from yotta.lib import auth
         # if yotta is being run noninteractively, then we never retry, but we
         # do call auth.authorizeUser, so that a login URL can be displayed:
         interactive = globalconf.get('interactive')
@@ -169,6 +169,9 @@ def _friendlyAuthError(fn):
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == requests.codes.unauthorized: #pylint: disable=no-member
                 logger.error('insufficient permission')
+            elif e.response.status_code == requests.codes.bad and 'jwt has expired' in e.response.text.lower(): #pylint: disable=no-member
+                logger.error('server returned status %s: %s', e.response.status_code, e.response.text)
+                logger.error('Check that your system clock is set accurately!')
             else:
                 logger.error('server returned status %s: %s', e.response.status_code, e.response.text)
             raise
@@ -389,13 +392,9 @@ def _getPrivateKeyObject(registry=None):
             privatekey_der, None, default_backend()
         )
 
-_yotta_version = None
 def _getYottaVersion():
-    global _yotta_version
-    if _yotta_version is None:
-        import pkg_resources
-        _yotta_version = pkg_resources.require("yotta")[0].version
-    return _yotta_version
+    import yotta
+    return yotta.__version__
 
 def _getYottaClientUUID():
     import uuid
@@ -646,6 +645,7 @@ def removeOwner(namespace, name, owner, registry=None):
 
     return True
 
+@_friendlyAuthError
 @_retryConnectionErrors
 def whoami(registry=None):
     registry = registry or Registry_Base_URL
@@ -660,9 +660,8 @@ def whoami(registry=None):
     if response.status_code == 401:
         # not logged in
         return None
-    elif response.status_code != 200:
-        logger.error('error getting user information: %s', response.error)
-        return None
+    else:
+        response.raise_for_status()
     return ', '.join(ordered_json.loads(response.text).get('primary_emails', {}).values())
 
 @_retryConnectionErrors

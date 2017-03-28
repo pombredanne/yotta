@@ -15,15 +15,15 @@ import random
 import errno
 
 # version, , represent versions and specifications, internal
-import version
+from yotta.lib import version
 # fsutils, , misc filesystem utils, internal
-import fsutils
+from yotta.lib import fsutils
 # folders, , where yotta stores things, internal
-import folders
+from yotta.lib import folders
 # Ordered JSON, , read & write json, internal
-import ordered_json
+from yotta.lib import ordered_json
 # settings, , load and save settings, internal
-import settings
+from yotta.lib import settings
 
 logger = logging.getLogger('access')
 cache_logger = logging.getLogger('cache')
@@ -43,6 +43,9 @@ class TargetUnavailable(Unavailable):
 class SpecificationNotMet(AccessException):
     pass
 
+class NotInCache(KeyError):
+    pass
+
 
 class RemoteVersion(version.Version):
     def __init__(self, version_string, url=None, name='unknown', friendly_source='unknown', friendly_version=None):
@@ -58,7 +61,13 @@ class RemoteVersion(version.Version):
     def __repr__(self):
         return u'%s@%s from %s' % (self.name, self.friendly_version, self.friendly_source)
     def __str__(self):
-        return self.__unicode__()
+        import sys
+        # in python 3 __str__ must return a string (i.e. unicode), in
+        # python 2, it must not return unicode, so:
+        if sys.version_info[0] >= 3:
+            return self.__unicode__()
+        else:
+            return self.__unicode__().encode('utf8')
     def __unicode__(self):
         return self.__repr__()
 
@@ -88,22 +97,39 @@ def getMaxCachedModules():
         _max_cached_modules = settings.get('maxCachedModules')
         if _max_cached_modules is None:
             # arbitrary default value
-            _max_cached_modules = 200
+            _max_cached_modules = 400
     return _max_cached_modules
+
+def _encodeCacheKey(cache_key):
+    import sys
+    # if we're under python 2, and cache_key is unicode (it will be, but check
+    # to be defensive), encode it as ascii. This prevents coersion errors if
+    # the username has unicode charaters in it.
+    if sys.version_info[0] < 3 and isinstance(cache_key, unicode):
+        return cache_key.encode('ascii')
+    return cache_key
 
 def pruneCache():
     ''' Prune the cache '''
     cache_dir = folders.cacheDirectory()
     def fullpath(f):
         return os.path.join(cache_dir, f)
+    def getMTimeSafe(f):
+        # it's possible that another process removed the file before we stat
+        # it, handle this gracefully
+        try:
+            return os.stat(f).st_mtime
+        except FileNotFoundError:
+            import time
+            return time.clock()
     # ensure cache exists
     fsutils.mkDirP(cache_dir)
     max_cached_modules = getMaxCachedModules()
     for f in sorted(
             [f for f in os.listdir(cache_dir) if
-                os.path.isfile(fullpath(f)) and not f.endswith('.json')
+                os.path.isfile(fullpath(f)) and not f.endswith('.json') and not f.endswith('.locked')
             ],
-            key = lambda f: os.stat(fullpath(f)).st_mtime,
+            key = lambda f: getMTimeSafe(fullpath(f)),
             reverse = True
         )[max_cached_modules:]:
         cache_logger.debug('cleaning up cache file %s', f)
@@ -170,16 +196,24 @@ def unpackFrom(tar_file_path, to_directory):
 
 def removeFromCache(cache_key):
     f = os.path.join(folders.cacheDirectory(), cache_key)
-    fsutils.rmF(f)
-    # remove any metadata too, if it exists
-    fsutils.rmF(f + '.json')
+    try:
+        fsutils.rmF(f)
+        # remove any metadata too, if it exists
+        fsutils.rmF(f + '.json')
+    except OSError as e:
+        # if we failed to remove either file, then it might be because another
+        # instance of yotta is using it, so just skip it this time.
+        pass
 
 def unpackFromCache(cache_key, to_directory):
     ''' If the specified cache key exists, unpack the tarball into the
-        specified directory, otherwise raise KeyError.
+        specified directory, otherwise raise NotInCache (a KeyError subclass).
     '''
     if cache_key is None:
-        raise KeyError('"None" is never in cache')
+        raise NotInCache('"None" is never in cache')
+
+    cache_key = _encodeCacheKey(cache_key)
+
     cache_dir = folders.cacheDirectory()
     fsutils.mkDirP(cache_dir)
     path = os.path.join(cache_dir, cache_key)
@@ -198,13 +232,18 @@ def unpackFromCache(cache_key, to_directory):
     except IOError as e:
         if e.errno == errno.ENOENT:
             cache_logger.debug('%s not in cache', cache_key)
-            raise KeyError('not in cache')
+            raise NotInCache('not in cache')
+    except OSError as e:
+        if e.errno == errno.ENOTEMPTY:
+            logger.error('directory %s was not empty: probably simultaneous invocation of yotta! It is likely that downloaded sources are corrupted.')
+        else:
+            raise
 
-def downloadToCache(stream, hashinfo={}, cache_key=None, origin_info=dict()):
+def _downloadToCache(stream, hashinfo={}, origin_info=dict()):
     ''' Download the specified stream to a temporary cache directory, and
         returns a cache key that can be used to access/remove the file.
-        If cache_key is None, then a cache key will be generated and returned.
-        You will probably want to use removeFromCache(cache_key) to remove it.
+        You should use either removeFromCache(cache_key) or _moveCachedFile to
+        move the downloaded file to a known key after downloading.
     '''
     hash_name  = None
     hash_value = None
@@ -223,15 +262,12 @@ def downloadToCache(stream, hashinfo={}, cache_key=None, origin_info=dict()):
         if not hash_name:
             logger.warning('could not find supported hash type in %s', hashinfo)
 
-    if cache_key is None:
-        cache_key = '%032x' % random.getrandbits(256)
-
     cache_dir = folders.cacheDirectory()
     fsutils.mkDirP(cache_dir)
-    cache_as = os.path.join(cache_dir, cache_key)
     file_size = 0
 
-    (download_file, download_fname) = tempfile.mkstemp(dir=cache_dir)
+    (download_file, download_fname) = tempfile.mkstemp(dir=cache_dir, suffix='.locked')
+
     with os.fdopen(download_file, 'wb') as f:
         f.seek(0)
         for chunk in stream.iter_content(4096):
@@ -251,25 +287,38 @@ def downloadToCache(stream, hashinfo={}, cache_key=None, origin_info=dict()):
         file_size = f.tell()
         logger.debug('wrote tarfile of size: %s to %s', file_size, download_fname)
         f.truncate()
+
+    extended_origin_info = {
+        'hash': hashinfo,
+        'size': file_size
+    }
+    extended_origin_info.update(origin_info)
+    ordered_json.dump(download_fname + '.json', extended_origin_info)
+    return os.path.basename(download_fname)
+
+def _moveCachedFile(from_key, to_key):
+    ''' Move a file atomically within the cache: used to make cached files
+        available at known keys, so they can be used by other processes.
+    '''
+    cache_dir = folders.cacheDirectory()
+    from_path = os.path.join(cache_dir, from_key)
+    to_path   = os.path.join(cache_dir, to_key)
     try:
-        os.rename(download_fname, cache_as)
-        extended_origin_info = {
-            'hash': hashinfo,
-            'size': file_size
-        }
-        extended_origin_info.update(origin_info)
-        ordered_json.dump(cache_as + '.json', extended_origin_info)
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            # if we failed, it's because the file already exists (probably
-            # because another process got there first), so just rm our
-            # temporary file and continue
-            cache_logger.debug('another process downloaded %s first', cache_key)
-            fsutils.rmF(download_fname)
+        os.rename(from_path, to_path)
+        # if moving the actual file was successful, then try to move the
+        # metadata:
+        os.rename(from_path+'.json', to_path+'.json')
+    except Exception as e:
+        # if the source doesn't exist, or the destination doesn't exist, remove
+        # the file instead.
+        # windows error 183 == file already exists
+        # (be careful not to use WindowsError on non-windows platforms as it
+        # isn't defined)
+        if (isinstance(e, OSError) and e.errno == errno.ENOENT) or \
+           (isinstance(e, getattr(__builtins__, "WindowsError", type(None))) and e.errno == 183):
+            fsutils.rmF(from_path)
         else:
             raise
-
-    return cache_key
 
 @sometimesPruneCache(0.05)
 def unpackTarballStream(stream, into_directory, hash={}, cache_key=None, origin_info=dict()):
@@ -278,12 +327,22 @@ def unpackTarballStream(stream, into_directory, hash={}, cache_key=None, origin_
         requests you can try to retrieve the key value from the cache first,
         before making the request)
     '''
+    cache_key = _encodeCacheKey(cache_key)
 
-    new_cache_key = downloadToCache(stream, hash, cache_key, origin_info)
+    # if the cache is disabled, then use a random cache key even if one was
+    # provided, so that the module is not persisted in the cache and its
+    # temporary download location is a random key:
+    if getMaxCachedModules() == 0:
+        cache_key = None
+
+    new_cache_key = _downloadToCache(stream, hash, origin_info)
     unpackFromCache(new_cache_key, into_directory)
 
-    # if we didn't provide a cache key, there's no point in storing the cache
     if cache_key is None:
+        # if we didn't provide a cache key, there's no point in storing the cache
         removeFromCache(new_cache_key)
+    else:
+        # otherwise make this file available at the known cache key
+        _moveCachedFile(new_cache_key, cache_key)
 
 

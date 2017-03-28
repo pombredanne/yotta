@@ -66,13 +66,27 @@ reference](/reference/buildsystem.html).
 
 Options:
 
- * `--generate-only`, `-g`: only generate the CMakeLists, don't build
- * `--release-build`, `-r`: build a release (optimised) build. The exact effects depend on the toolchain.
- * `--cmake-generator`, `-G`: specify the CMake Generator. CMake can generate project files for various editors and IDEs.
- * `name ...`: one or more modules may be specified, in which case only these
+  * **`--generate-only`, `-g`**: only generate the CMakeLists, don't build
+
+  * **`--debug-build`, `-d`**: build a debug (less-optimised) build.
+
+    The effects depend on the target (this selects CMake build type `Debug`),
+    but generally this means no optimisation, and `NDEBUG` is not defined.
+
+  * **`--release-build`, `-r`**: build a release (optimised) build.   **deprecated**
+
+    The effects depend on the target (this selects CMake build type
+    `RelWithDebInfo`).
+    This option is deprecated because it is now the default, unless
+    `--debug-build` is specified.
+
+  * **`--cmake-generator`, `-G`**: specify the CMake Generator. CMake can generate project files for various editors and IDEs.
+
+  * **`name ...`**: one or more modules may be specified, in which case only these
    modules and their dependencies will be built. Use `all_tests` to cause all
    tests to be built.
- * `-- ...`: any options specified after `--` are passed unmodified on to the tool being used for building (e.g. Ninja, or make)
+
+  * **`-- ...`**: any options specified after `--` are passed unmodified on to the tool being used for building (e.g. Ninja, or make)
 
 #### Generating IDE Project Files
 The `-G`/`--cmake-generator` option can be used to generate project files for
@@ -204,7 +218,7 @@ yotta debug source/helloyotta
 
 ```
 yotta target
-yotta target <targetname>[,url-or-version-spec] [-g] [-n]
+yotta target <targetname>[@url-or-version-spec] [-g] [-n]
 ```
 
 #### Description
@@ -223,6 +237,13 @@ the current module only, in a `.yotta.json` file.
 
 If the target is set both locally and globally, then the locally set target
 takes precedence.
+
+#### Examples
+
+```
+yotta target x86-osx-native
+yotta target frdm-k64f-gcc@^2.0.0
+```
 
 ## <a href="#yotta-install" name="yotta-install">#</a> yotta install
 Synonyms: `yotta in`
@@ -377,12 +398,13 @@ Synonyms: `yotta ln`
 ```
 yotta link (in a module directory)
 yotta link <modulename>
+yotta link /path/to/a/module
 ```
 
 #### Description
 Module linking allows you to use local versions of modules when building other modules – it's useful when fixing a bug in a dependency that is most easily reproduced when that dependency is used by another module.
 
-To link a module you need to perform two steps. First, in the directory of the dependency:
+To link a module there are two steps. First, in the directory of the dependency:
 
 ```
 yotta link
@@ -399,6 +421,8 @@ yotta link <depended-on-module-name>
 When you run `yotta build` it will then pick up the linked module.
 
 This works for direct and indirect dependencies: you can link to a module that your module does not use directly, but a dependency of your module does.
+
+The variant of the command which takes a path to an existing module (e.g. `yotta link ../path/to/a/module`) performs both steps in sequence, for convenience.
 
 **WARNING:** yotta uses directory junctions to provide links on windows. **Some
 command line tools are not aware of directory junctions and will recurse
@@ -424,6 +448,7 @@ environment variable.
 ```
 yotta link-target (in a target directory)
 yotta link-target <targetename>
+yotta link-target /path/to/a/target
 ```
 
 #### Description
@@ -445,16 +470,68 @@ yotta link-target <targetename>
 
 When you run `yotta build` (provided you've set `yotta target` to `<targetname>`), the linked target description will be used.
 
+The variant of the command which takes a path to an existing module (e.g. `yotta link ../path/to/a/module`) performs both steps in sequence, for convenience.
+
+See also [yotta link](#yotta-link).
+
+
 ## <a href="#yotta-list" name="yotta-list">#</a> yotta list
 Synonyms: `yotta ls`
 #### Synopsis
 
 ```
 yotta list [--all]
+yotta list [--json]
 ```
 
 #### Description
-List the installed dependencies of the current module, including information on the installed versions. Unless `--all` is specified, dependencies are only listed under the modules that first use them, with `--all` dependencies that are used my multiple modules are listed multiple times (but all modules will use the same installed instance of the dependency).
+List the installed dependencies of the current module, including information on
+the installed versions. Unless `--all` is specified, dependencies are only
+listed under the modules that first use them, with `--all` dependencies that
+are used my multiple modules are listed multiple times (but all modules will
+use the same installed instance of the dependency).
+
+The `--json` option will cause the list to be output in JSON format, for
+example:
+
+```JSON
+{
+  "modules": [
+    {
+      "name": "toplevel-module-name",
+      "version": "1.0.0",
+      "path": "/some/path/on/disk/toplevel-module-name",
+      "specifications": [
+        {
+          "version": "~0.11.0",
+          "name": "some-dependency-name"
+        }
+      ]
+    },
+    {
+      "name": "some-dependency-name",
+      "version": "0.11.7",
+      "path": "/some/path/on/disk/yotta_modules/some-dependency-name",
+      "linkedTo": "/some/path/on/disk/some-dependency-name",
+      "specifications": [
+        {
+          "version": "ARMmbed/some-test-dependency#^1.2.3",
+          "name": "some-test-dependency",
+          "testOnly": true
+        }
+      ]
+    },
+    {
+      "name": "some-test-dependency",
+      "version": "1.5.6",
+      "path": "/some/path/on/disk/yotta_modules/some-test-dependency",
+      "errors": [
+        "a description of some error with this module"
+      ]
+    }
+}
+```
+
 
 ## <a href="#yotta-uninstall" name="yotta-uninstall">#</a> yotta uninstall
 Synonyms: `yotta unlink`, `yotta rm`
@@ -532,3 +609,54 @@ yotta outdated
 #### Description
 List modules for which newer versions are available from the yotta registry.
 
+## <a href="#yotta-shrinkwrap" name="yotta-shrinkwrap">#</a> yotta shrinkwrap
+
+#### Synopsis
+
+```
+yotta shrinkwrap
+```
+
+#### Description
+Create a `yotta-shrinkwrap.json` file in the current module, which specifies
+the exact versions of dependencies and target descriptions currently being
+used.
+
+When a module with a `yotta-shrinkwrap.json` file is installed, the versions
+specified in the shrinkwrap will be downloaded from the public yotta registry,
+instead of the latest versions that satisfy the specifications from module.json
+files. **When a shrinkwrap file is present, dependencies will always be
+downloaded from the registry, not from git/other URLs.**
+
+In practise this allows an application or module to specify a known-good set of
+dependencies that it should be used with.
+
+Note that generally publishing modules with a `yotta-shrinkwrap.json` file to
+the yotta registry should be avoided. The exact versions specified in the
+shrink-wrap could easily cause version conflicts with other modules which
+depend on the same modules.
+
+The format of the `yotta-shrinkwrap.json` file is:
+
+```
+{
+  "modules": [
+    {
+      "version": "1.0.0",
+      "name": "first-module-name"
+    },
+    {
+      "version": "0.11.7",
+      "name": "a-dependency-name"
+    },
+    ...
+  ],
+  "targets": [
+   {
+     "version": "1.2.3",
+     "name": "some-target-name"
+   },
+   ...
+  ]
+}
+```

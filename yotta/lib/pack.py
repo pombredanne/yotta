@@ -1,4 +1,4 @@
-# Copyright 2014 ARM Limited
+# Copyright 2014-2016 ARM Limited
 #
 # Licensed under the Apache License, Version 2.0
 # See LICENSE file for details.
@@ -21,16 +21,12 @@ from pathlib import PurePath
 # JSON Schema, pip install jsonschema, Verify JSON Schemas, MIT
 import jsonschema
 
-# version, , represent versions and specifications, internal
-import version
 # Ordered JSON, , read & write json, internal
-import ordered_json
-# vcs, , represent version controlled directories, internal
-import vcs
+from yotta.lib import ordered_json
 # fsutils, , misc filesystem utils, internal
-import fsutils
+from yotta.lib import fsutils
 # Registry Access, , access packages in the registry, internal
-import registry_access
+from yotta.lib import registry_access
 
 # These patterns are used in addition to any glob expressions defined by the
 # .yotta_ignore file
@@ -52,9 +48,20 @@ Default_Publish_Ignore = [
 Readme_Regex = re.compile('^readme(?:\.md)', re.IGNORECASE)
 
 Ignore_List_Fname = '.yotta_ignore'
+Shrinkwrap_Fname  = 'yotta-shrinkwrap.json'
+Shrinkwrap_Schema = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'schema', 'shrinkwrap.json')
 Origin_Info_Fname = '.yotta_origin.json'
 
 logger = logging.getLogger('components')
+
+def tryTerminate(process):
+    try:
+        process.terminate()
+    except OSError as e:
+        # if the error is "no such process" then the process probably exited
+        # while we were waiting for it, so don't raise an exception
+        if e.errno != errno.ESRCH:
+            raise
 
 class InvalidDescription(Exception):
     pass
@@ -92,17 +99,57 @@ class OptionalFileWrapper(object):
 
 
 class DependencySpec(object):
-    def __init__(self, name, version_req, is_test_dependency=False):
+    def __init__(self, name, version_req, is_test_dependency=False, shrinkwrap_version_req=None, specifying_module=None):
         self.name = name
         self.version_req = version_req
+        self.specifying_module = specifying_module # for diagnostic info only, may not be present
         self.is_test_dependency = is_test_dependency
+        self.shrinkwrap_version_req = shrinkwrap_version_req
+
+    def isShrinkwrapped(self):
+        return self.shrinkwrap_version_req is not None
+
+    def nonShrinkwrappedVersionReq(self):
+        ''' return the dependency specification ignoring any shrinkwrap '''
+        return self.version_req
+
+    def versionReq(self):
+        ''' return the dependency specification, which may be from a shrinkwrap file '''
+        return self.shrinkwrap_version_req or self.version_req
 
     def __unicode__(self):
         return u'%s at %s' % (self.name, self.version_req)
     def __str__(self):
-        return self.__unicode__().encode('utf-8')
+        import sys
+        # in python 3 __str__ must return a string (i.e. unicode), in
+        # python 2, it must not return unicode, so:
+        if sys.version_info[0] >= 3:
+            return self.__unicode__()
+        else:
+            return self.__unicode__().encode('utf8')
     def __repr__(self):
         return self.__unicode__()
+
+def tryReadJSON(filename, schemaname):
+    r = None
+    try:
+        with open(filename, 'r') as jsonfile:
+            r = ordered_json.load(filename)
+            if schemaname is not None:
+                with open(schemaname, 'r') as schema_file:
+                    schema = json.load(schema_file)
+                    validator = jsonschema.Draft4Validator(schema)
+                    for error in validator.iter_errors(r):
+                        logger.error(
+                            '%s is not valid under the schema: %s value %s',
+                            filename,
+                            u'.'.join([str(x) for x in error.path]),
+                            error.message
+                        )
+    except IOError as e:
+        if e.errno != errno.ENOENT:
+            raise
+    return r
 
 # Pack represents the common parts of Target and Component objects (versions,
 # VCS, etc.)
@@ -116,8 +163,14 @@ class Pack(object):
             description_filename,
             installed_linked,
             schema_filename = None,
-            latest_suitable_version = None
+            latest_suitable_version = None,
+            inherit_shrinkwrap = None
         ):
+        # version, , represent versions and specifications, internal
+        from yotta.lib import version
+        # vcs, , represent version controlled directories, internal
+        from yotta.lib import vcs
+
         # resolve links at creation time, to minimise path lengths:
         self.unresolved_path = path
         self.path = fsutils.realpath(path)
@@ -155,6 +208,28 @@ class Pack(object):
         except IOError as e:
             if e.errno != errno.ENOENT:
                 raise
+        # warn about invalid yotta versions before schema errors (as new yotta
+        # might introduce new schema)
+        yotta_version_spec = None
+        if self.description and self.description.get('yotta', None):
+            try:
+                yotta_version_spec = version.Spec(self.description['yotta'])
+            except ValueError as e:
+                logger.warning(
+                    "could not parse yotta version spec '%s' from %s: it "+
+                    "might require a newer version of yotta",
+                    self.description['yotta'],
+                    self.description['name']
+                )
+        if yotta_version_spec is not None:
+            import yotta
+            yotta_version = version.Version(yotta.__version__)
+            if not yotta_version_spec.match(yotta_version):
+                self.error = "requires yotta version %s (current version is %s). see http://yottadocs.mbed.com for update instructions" % (
+                    str(yotta_version_spec),
+                    str(yotta_version)
+                )
+
         if self.description and schema_filename and not self.path in self.schema_errors_displayed:
             self.schema_errors_displayed.add(self.path)
             have_errors = False
@@ -173,7 +248,36 @@ class Pack(object):
             # though!
             #if have_errors:
             #    raise InvalidDescription('Invalid %s' % description_filename)
+        self.inherited_shrinkwrap = None
+        self.shrinkwrap = None
+        # we can only apply shrinkwraps to instances with valid descriptions:
+        # instances do not become valid after being invalid so this is safe
+        # (but it means you cannot trust the shrinkwrap of an invalid
+        # component)
+        # (note that it is unsafe to use the __bool__ operator on self here as
+        # we are not fully constructed)
+        if self.description:
+            self.inherited_shrinkwrap = inherit_shrinkwrap
+            self.shrinkwrap = tryReadJSON(os.path.join(path, Shrinkwrap_Fname), Shrinkwrap_Schema)
+            if self.shrinkwrap:
+                logger.warning('dependencies of %s are pegged by yotta-shrinkwrap.json', self.getName())
+                if self.inherited_shrinkwrap:
+                    logger.warning('shrinkwrap in %s overrides inherited shrinkwrap', self.getName())
+        #logger.info('%s created with inherited_shrinkwrap %s', self.getName(), self.inherited_shrinkwrap)
         self.vcs = vcs.getVCS(path)
+
+    def getShrinkwrap(self):
+        return self.shrinkwrap or self.inherited_shrinkwrap
+
+    def getShrinkwrapMapping(self, variant='modules'):
+        shrinkwrap = self.getShrinkwrap()
+        assert(variant in ['modules', 'targets'])
+        if shrinkwrap and variant in shrinkwrap:
+            return {
+                x['name']: x['version'] for x in shrinkwrap[variant]
+            }
+        else:
+            return {}
 
     def origin(self):
         ''' Read the .yotta_origin.json file (if present), and return the value
@@ -256,6 +360,12 @@ class Pack(object):
             return self.description['name']
         else:
             return None
+
+    def getKeywords(self):
+        if self.description:
+            return self.description.get('keywords', [])
+        else:
+            return []
 
     def _parseIgnoreFile(self, f):
         r = []
@@ -385,6 +495,79 @@ class Pack(object):
             self.getVersion(),
             registry=registry
         )
+
+    def getScript(self, scriptname):
+        ''' Return the specified script command. If the first part of the
+            command is a .py file, then the current python interpreter is
+            prepended.
+
+            If the script is a single string, rather than an array, it is
+            shlex-split.
+        '''
+        script = self.description.get('scripts', {}).get(scriptname, None)
+        if script is not None:
+            if isinstance(script, str) or isinstance(script, type(u'unicode string')):
+                import shlex
+                script = shlex.split(script)
+            # if the command is a python script, run it with the python
+            # interpreter being used to run yotta, also fetch the absolute path
+            # to the script relative to this module (so that the script can be
+            # distributed with the module, no matter what current working
+            # directory it will be executed in):
+            if len(script) and script[0].lower().endswith('.py'):
+                if not os.path.isabs(script[0]):
+                    absscript = os.path.abspath(os.path.join(self.path, script[0]))
+                    logger.debug('rewriting script %s to be absolute path %s', script[0], absscript)
+                    script[0] = absscript
+                import sys
+                script = [sys.executable] + script
+
+        return script
+
+
+    @fsutils.dropRootPrivs
+    def runScript(self, scriptname, additional_environment=None):
+        ''' Run the specified script from the scripts section of the
+            module.json file in the directory of this module.
+        '''
+        import subprocess
+        import shlex
+
+        command = self.getScript(scriptname)
+        if command is None:
+            logger.debug('%s has no script %s', self, scriptname)
+            return 0
+
+        if not len(command):
+            logger.error("script %s of %s is empty", scriptname, self.getName())
+            return 1
+
+        # define additional environment variables for scripts:
+        env = os.environ.copy()
+        if additional_environment is not None:
+            env.update(additional_environment)
+
+        errcode = 0
+        child = None
+        try:
+            logger.debug('running script: %s', command)
+            child = subprocess.Popen(
+                command, cwd = self.path, env = env
+            )
+            child.wait()
+            if child.returncode:
+                logger.error(
+                    "script %s (from %s) exited with non-zero status %s",
+                    scriptname,
+                    self.getName(),
+                    child.returncode
+                )
+                errcode = child.returncode
+            child = None
+        finally:
+            if child is not None:
+                tryTerminate(child)
+        return errcode
 
 
     @classmethod

@@ -16,14 +16,12 @@ import shlex
 from collections import OrderedDict
 
 # Ordered JSON, , read & write json, internal
-import ordered_json
-# access, , get components, internal
-import access
-import access_common
+from yotta.lib import ordered_json
 # Pack, , common parts of Components/Targets, internal
-import pack
+from yotta.lib import pack
+from yotta.lib.pack import tryTerminate as _tryTerminate
 # fsutils, , misc filesystem utils, internal
-import fsutils
+from yotta.lib import fsutils
 
 Target_Description_File = 'target.json'
 App_Config_File = 'config.json'
@@ -66,6 +64,16 @@ def _mirrorStructure(dictionary, value):
             result[k] = value
     return result
 
+def _encodePathForEnv(s):
+    # under python 2.7, be sure that paths being exported as environment
+    # variables are encoded (as utf-8 byte strings), not unicode objects:
+    import sys
+    if sys.version_info[0] == 2:
+        assert(isinstance(s, type(u'')) or isinstance(s, type(b'')))
+        if not isinstance(s, type(b'')):
+            s = s.encode('utf-8')
+    return s
+
 # API
 
 def loadAdditionalConfig(config_path):
@@ -100,8 +108,12 @@ def getDerivedTarget(
                 application_dir = None,
                 install_missing = True,
                update_installed = False,
-              additional_config = None
+              additional_config = None,
+                     shrinkwrap = None
     ):
+    # access, , get components, internal
+    from yotta.lib import access
+    from yotta.lib import access_common
     ''' Get the specified target description, optionally ensuring that it (and
         all dependencies) are installed in targets_path.
 
@@ -110,10 +122,29 @@ def getDerivedTarget(
     '''
     logger.debug('satisfy target: %s' % target_name_and_version);
     if ',' in target_name_and_version:
-        name, ver = target_name_and_version.split(',')
-        dspec = pack.DependencySpec(name, ver)
+        name, version_req = target_name_and_version.split(',')
     else:
-        dspec = pack.DependencySpec(target_name_and_version, "*")
+        name = target_name_and_version
+        version_req = '*'
+
+    # shrinkwrap is the raw json form, not mapping form here, so rearrange it
+    # before indexing:
+    if shrinkwrap is not None:
+        shrinkwrap_version_req = {
+            x['name']: x['version'] for x in shrinkwrap.get('targets', [])
+        }.get(name, None)
+    else:
+        shrinkwrap_version_req = None
+    if shrinkwrap_version_req is not None:
+        logger.debug(
+            'respecting shrinkwrap version %s for %s', shrinkwrap_version_req, name
+        )
+
+    dspec = pack.DependencySpec(
+                                 name,
+                                 version_req,
+        shrinkwrap_version_req = shrinkwrap_version_req
+    )
 
     leaf_target      = None
     previous_name    = dspec.name
@@ -126,21 +157,23 @@ def getDerivedTarget(
             if install_missing:
                 t = access.satisfyVersion(
                                  name = dspec.name,
-                     version_required = dspec.version_req,
+                     version_required = dspec.versionReq(),
                             available = target_hierarchy,
                          search_paths = search_dirs,
                     working_directory = targets_path,
                      update_installed = ('Update' if update_installed else None),
-                                 type = 'target'
+                                 type = 'target',
+                   inherit_shrinkwrap = shrinkwrap
                 )
             else:
                 t = access.satisfyVersionFromSearchPaths(
                                  name = dspec.name,
-                     version_required = dspec.version_req,
+                     version_required = dspec.versionReq(),
                          search_paths = search_dirs,
-                                 type = 'target'
+                                 type = 'target',
+                   inherit_shrinkwrap = shrinkwrap
                 )
-        except access_common.Unavailable as e:
+        except access_common.AccessException as e:
             errors.append(e)
         if not t:
             if install_missing:
@@ -173,7 +206,13 @@ def getDerivedTarget(
     return (DerivedTarget(leaf_target, target_hierarchy[1:], app_config, additional_config), errors)
 
 class Target(pack.Pack):
-    def __init__(self, path, installed_linked=False, latest_suitable_version=None):
+    def __init__(
+            self,
+            path,
+            installed_linked = False,
+            latest_suitable_version = None,
+            inherit_shrinkwrap = None
+        ):
         ''' Initialise a Target based on a directory. If the directory does not
             contain a valid target.json file the initialised object will test
             false, and will contain an error property containing the failure.
@@ -184,8 +223,14 @@ class Target(pack.Pack):
                description_filename = Target_Description_File,
                    installed_linked = installed_linked,
                     schema_filename = Schema_File,
-            latest_suitable_version = latest_suitable_version
+            latest_suitable_version = latest_suitable_version,
+                 inherit_shrinkwrap = inherit_shrinkwrap
         )
+        if self.description and inherit_shrinkwrap is not None:
+            # when inheriting a shrinkwrap, check that this module is
+            # listed in the shrinkwrap, otherwise emit a warning:
+            if next((x for x in inherit_shrinkwrap.get('targets', []) if x['name'] == self.getName()), None) is None:
+                logger.warning("%s missing from shrinkwrap", self.getName())
 
     def baseTargetSpec(self):
         ''' returns pack.DependencySpec for the base target of this target (or
@@ -193,7 +238,17 @@ class Target(pack.Pack):
         '''
         inherits = self.description.get('inherits', {})
         if len(inherits) == 1:
-            return pack.DependencySpec(list(inherits.items())[0][0], list(inherits.items())[0][1])
+            name, version_req = list(inherits.items())[0]
+            shrinkwrap_version_req = self.getShrinkwrapMapping('targets').get(name, None)
+            if shrinkwrap_version_req is not None:
+                logger.debug(
+                    'respecting shrinkwrap version %s for %s', shrinkwrap_version_req, name
+                )
+            return pack.DependencySpec(
+                name,
+                version_req,
+                shrinkwrap_version_req = shrinkwrap_version_req
+            )
         elif len(inherits) > 1:
             logger.error('target %s specifies multiple base targets, but only one is allowed', self.getName())
         return None
@@ -248,8 +303,9 @@ class DerivedTarget(Target):
             a base target)
         '''
         for t in self.hierarchy:
-            if 'scripts' in t.description and scriptname in t.description['scripts']:
-                return t.description['scripts'][scriptname]
+            s = t.getScript(scriptname)
+            if s:
+                return s
         return None
 
     def _loadConfig(self):
@@ -310,11 +366,34 @@ class DerivedTarget(Target):
 
     def getToolchainFiles(self):
         ''' return a list of toolchain file paths in override order (starting
-            at the bottom/leaf of the hierarchy and ending at the base)
+            at the bottom/leaf of the hierarchy and ending at the base).
+            The list is returned in the order they should be included
+            (most-derived last).
         '''
-        return [
+        return reversed([
             os.path.join(x.path, x.description['toolchain']) for x in self.hierarchy if 'toolchain' in x.description
-        ]
+        ])
+
+    def getAdditionalIncludes(self):
+        ''' Return the list of cmake files which are to be included by yotta in
+            every module built. The list is returned in the order they should
+            be included (most-derived last).
+        '''
+        return reversed([
+            os.path.join(t.path, include_file)
+                for t in self.hierarchy
+                for include_file in t.description.get('cmakeIncludes', [])
+        ])
+
+    def inheritsFrom(self, target_name):
+        ''' Return true if this target inherits from the named target (directly
+            or indirectly. Also returns true if this target is the named
+            target. Otherwise return false.
+        '''
+        for t in self.hierarchy:
+            if t and t.getName() == target_name or target_name in t.description.get('inherits', {}):
+                return True
+        return False
 
     @classmethod
     def addBuildOptions(cls, parser):
@@ -416,7 +495,7 @@ class DerivedTarget(Target):
 
         # work-around various yotta-specific issues with the generated
         # Ninja/project files:
-        import cmake_fixups
+        from yotta.lib import cmake_fixups
         cmake_fixups.applyFixupsForFenerator(args.cmake_generator, builddir, component)
 
         build_command = self.overrideBuildCommand(args.cmake_generator, targets=targets)
@@ -512,6 +591,56 @@ class DerivedTarget(Target):
         logging.error('could not find program "%s" to debug' %  program)
         return None
 
+    def buildProgEnvAndVars(self, program, build_dir):
+        prog_env = os.environ.copy()
+        prog_env['YOTTA_PROGRAM'] = _encodePathForEnv(program)
+        prog_env['YOTTA_BUILD_DIR'] = _encodePathForEnv(build_dir)
+        prog_env['YOTTA_TARGET_DIR'] = _encodePathForEnv(self.path)
+        prog_vars = dict(program=program,
+                         build_dir=build_dir,
+                         target_dir=self.path)
+
+        return (prog_env, prog_vars)
+
+    @fsutils.dropRootPrivs
+    def start(self, builddir, program, forward_args):
+        ''' Launch the specified program. Uses the `start` script if specified
+            by the target, attempts to run it natively if that script is not
+            defined.
+        '''
+        child = None
+        try:
+            prog_path = self.findProgram(builddir, program)
+            if prog_path is None:
+                return
+
+            start_env, start_vars = self.buildProgEnvAndVars(prog_path, builddir)
+            if self.getScript('start'):
+                cmd = [
+                    os.path.expandvars(string.Template(x).safe_substitute(**start_vars))
+                    for x in self.getScript('start')
+                ] + forward_args
+            else:
+                cmd = shlex.split('./' + prog_path) + forward_args
+
+            logger.debug('starting program: %s', cmd)
+            child = subprocess.Popen(
+                cmd, cwd = builddir, env = start_env
+            )
+            child.wait()
+            if child.returncode:
+                return "process exited with status %s" % child.returncode
+            child = None
+        except OSError as e:
+            import errno
+            if e.errno == errno.ENOEXEC:
+                return ("the program %s cannot be run (perhaps your target "+
+                        "needs to define a 'start' script to start it on its "
+                        "intended execution target?)") % prog_path
+        finally:
+            if child is not None:
+                _tryTerminate(child)
+
     def debug(self, builddir, program):
         ''' Launch a debugger for the specified program. Uses the `debug`
             script if specified by the target, falls back to the `debug` and
@@ -539,17 +668,19 @@ class DerivedTarget(Target):
     def _debugWithScript(self, builddir, program):
         child = None
         try:
-            prog_path = prog_path = self.findProgram(builddir, program)
+            prog_path = self.findProgram(builddir, program)
             if prog_path is None:
                 return
 
+            debug_env, debug_vars = self.buildProgEnvAndVars(prog_path, builddir)
+
             cmd = [
-                os.path.expandvars(string.Template(x).safe_substitute(program=prog_path))
+                os.path.expandvars(string.Template(x).safe_substitute(**debug_vars))
                 for x in self.getScript('debug')
             ]
             logger.debug('starting debugger: %s', cmd)
             child = subprocess.Popen(
-                cmd, cwd = builddir
+                cmd, cwd = builddir, env = debug_env
             )
             child.wait()
             if child.returncode:
@@ -561,10 +692,7 @@ class DerivedTarget(Target):
             raise
         finally:
             if child is not None:
-                try:
-                    child.terminate()
-                except OSError as e:
-                    pass
+                _tryTerminate(child)
 
     @fsutils.dropRootPrivs
     def _debugDeprecated(self, builddir, program):
@@ -623,17 +751,33 @@ class DerivedTarget(Target):
                         pass
 
     @fsutils.dropRootPrivs
-    def test(self, cwd, test_command, filter_command, forward_args):
-        # we assume that test commands are relative to the current directory.
+    def test(self, test_dir, module_dir, test_command, filter_command, forward_args):
+        # we assume that test commands are relative to the current directory
+        # (filter commands are relative to the module dir to make it possible
+        # to use filter scripts shipped with the module)
         test_command = './' + test_command
         test_script = self.getScript('test')
+
+        test_env, test_vars = self.buildProgEnvAndVars(os.path.abspath(os.path.join(test_dir, test_command)), test_dir)
+
         if test_script is None:
-            cmd = shlex.split(test_command)
+            cmd = shlex.split(test_command) + forward_args
         else:
             cmd = [
-                os.path.expandvars(string.Template(x).safe_substitute(program=os.path.abspath(os.path.join(cwd, test_command))))
+                os.path.expandvars(string.Template(x).safe_substitute(**test_vars))
                 for x in test_script
             ] + forward_args
+
+        # if the command is a python script, run it with the python interpreter
+        # being used to run yotta:
+        if test_command[0].lower().endswith('.py'):
+            import sys
+            python_interpreter = sys.executable
+            cmd = [python_interpreter] + cmd
+        if filter_command and filter_command[0].lower().endswith('.py'):
+            import sys
+            python_interpreter = sys.executable
+            filter_command = [python_interpreter] + filter_command
 
         test_child = None
         test_filter = None
@@ -642,18 +786,21 @@ class DerivedTarget(Target):
             if filter_command:
                 logger.debug('using output filter command: %s', filter_command)
                 test_child = subprocess.Popen(
-                    cmd, cwd = cwd, stdout = subprocess.PIPE
+                    cmd, cwd = test_dir, stdout = subprocess.PIPE, env = test_env
                 )
                 try:
                     test_filter = subprocess.Popen(
-                        filter_command, cwd = cwd, stdin = test_child.stdout
+                        filter_command, cwd = module_dir, stdin = test_child.stdout, env = test_env
                     )
                 except OSError as e:
                     logger.error('error starting test output filter "%s": %s', filter_command, e)
-                    test_child.terminate()
+                    _tryTerminate(test_child)
                     return 1
+                logger.debug('waiting for filter process')
                 test_filter.communicate()
-                test_child.terminate()
+                if test_child.poll() is None:
+                    logger.warning('test child has not exited and will be terminated')
+                    _tryTerminate(test_child)
                 test_child.stdout.close()
                 returncode = test_filter.returncode
                 test_child = None
@@ -664,8 +811,9 @@ class DerivedTarget(Target):
             else:
                 try:
                     test_child = subprocess.Popen(
-                        cmd, cwd = cwd
+                        cmd, cwd = test_dir, env = test_env
                     )
+                    logger.debug('waiting for test child')
                 except OSError as e:
                     if e.errno == errno.ENOENT:
                         logger.error('Error: no such file or directory: "%s"', cmd[0])
@@ -679,8 +827,8 @@ class DerivedTarget(Target):
                     return 1
         finally:
             if test_child is not None:
-                test_child.terminate()
+                _tryTerminate(test_child)
             if test_filter is not None:
-                test_filter.terminate()
+                _tryTerminate(test_filter)
         logger.debug("test %s passed", test_command)
         return 0

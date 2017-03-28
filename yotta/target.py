@@ -13,26 +13,27 @@ import os
 import colorama
 
 # settings, , load and save settings, internal
-from .lib import settings
+from yotta.lib import settings
 # Target, , represents an installed target, internal
-from .lib import target
+from yotta.lib import target
 # Component, , represents an installed component, internal
-from .lib import component
+from yotta.lib import component
 # fsutils, , misc filesystem utils, internal
-from .lib import fsutils
+from yotta.lib import fsutils
 
 # OK this is a pretty terrible validation regex... should find a proper module
 # to do this
 Target_RE = re.compile('^('+
-    '[a-z]+[a-z0-9+-]*,?('+
-        '[a-zA-Z0-9-]+/[a-zA-Z0-9-]+' +'|'+ '([a-zA-Z0-9_-]*@)?[a-zA-Z0-9_+-]+://.*' + '|' + '[a-z0-9.-]*'+
+    '[a-z]+[a-z0-9+-]*('+
+        ',[a-zA-Z0-9-]+/[a-zA-Z0-9-]+' +'|'+ '([a-zA-Z0-9_-]*@)?[a-zA-Z0-9_+-]+://.*' + '|' + '[a-z0-9.-]*'+
     ')?'+
 ')$')
 
 
 def addOptions(parser):
     parser.add_argument('set_target', default=None, nargs='?',
-        help='set the build target to this (targetname[,versionspec_or_url])'
+        # targetname,versionspec_or_url is supported too
+        help='set the build target to this (targetname[@versionspec_or_url])'
     )
     parser.add_argument('-g', '--global', dest='save_global',
         default=False, action='store_true',
@@ -63,7 +64,7 @@ def displayCurrentTarget(args):
         app_path = None
 
     derived_target, errors = target.getDerivedTarget(
-        args.target, c.targetsPath(), application_dir=app_path, install_missing=False
+        args.target, c.targetsPath(), application_dir=app_path, install_missing=False, shrinkwrap=c.getShrinkwrap()
     )
     for error in errors:
         logging.error(error)
@@ -85,7 +86,7 @@ def displayCurrentTarget(args):
         if base_spec:
             # if the last target in the hierarchy has a base spec, then the
             # hierarchy is incomplete:
-            line += '\n' + BRIGHT + RED + base_spec.name + u' ' + base_spec.version_req + u' missing'
+            line += '\n' + BRIGHT + RED + base_spec.name + u' ' + base_spec.versionReq() + u' missing'
 
     if u'unicode' in str(type(line)):
         # python 2.7
@@ -99,38 +100,33 @@ def execCommand(args, following_args):
     if args.set_target is None:
         return displayCurrentTarget(args)
     else:
-        if not Target_RE.match(args.set_target):
-            logging.error('Invalid target: "%s"' % args.set_target)#, targets must be one of:
-            #
-            #    a valid name (lowercase letters, numbers, and hyphen)
-            #    a github ref (owner/project)
-            #    a valid url
-            #
-            #Note that to use a local directory as a target you can use
-            #
-            #    # in the directory containing the target package:
-            #    yotta link target
-            #
-            #    # then in the directory of the application to use the target:
-            #    yotta link target {targetname}
-            #    yotta target {targetname}
-            #
-            #''')
+        from yotta.lib import sourceparse
+        from yotta.lib import validate
+
+        name, spec = sourceparse.parseTargetNameAndSpec(args.set_target)
+        if not re.match(validate.Target_Name_Regex, name):
+            logging.error('Invalid target name: "%s" should use only a-z 0-9 - and +, and start with a letter.' % name)
             return 1
-        else:
-            if args.set_target.find(',') == -1:
-                t = args.set_target + ',*'
-            else:
-                t = args.set_target
-            settings.setProperty('build', 'target', t, not args.save_global)
-            if not args.no_install:
-                # if we have a module in the current directory, try to make sure
-                # this target is installed
-                c = component.Component(os.getcwd())
-                if c:
-                    target, errors = c.satisfyTarget(t)
-                    for err in errors:
-                        logging.error(err)
-                    if len(errors):
-                        logging.error('NOTE: use "yotta link-target" to test a locally modified target prior to publishing.')
-            return 0
+        if not sourceparse.isValidSpec(spec):
+            logging.error('Could not parse target version specification: "%s"' % spec)
+            return 1
+
+        # separating the target name and spec is still done with a comma
+        # internally (for now at least), although @ is the recommended way to
+        # set it:
+        t = '%s,%s' % (name, spec)
+
+        settings.setProperty('build', 'target', t, not args.save_global)
+        settings.setProperty('build', 'targetSetExplicitly', True, not args.save_global)
+        if not args.no_install:
+            # if we have a module in the current directory, try to make sure
+            # this target is installed
+            c = component.Component(os.getcwd())
+            if c:
+                target, errors = c.satisfyTarget(t)
+                for err in errors:
+                    logging.error(err)
+                if len(errors):
+                    logging.error('NOTE: use "yotta link-target" to test a locally modified target prior to publishing.')
+                    return 1
+        return 0

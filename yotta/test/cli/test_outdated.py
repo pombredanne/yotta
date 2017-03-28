@@ -8,8 +8,8 @@
 import unittest
 
 # internal modules:
-from . import cli
-from . import util
+from yotta.test.cli import util
+from yotta.test.cli import cli
 
 Test_Outdated = {
 'module.json':'''{
@@ -39,34 +39,24 @@ int foo(){
 '''
 }
 
-class TestCLIUpdate(unittest.TestCase):
-    def test_update(self):
+class TestCLIOutdated(unittest.TestCase):
+    def test_outdated(self):
         path = util.writeTestFiles(Test_Outdated, True)
 
-        stdout, stderr, statuscode = cli.run(['-t', 'x86-linux-native', 'update'], cwd=path)
-        self.assertEqual(statuscode, 0)
-        self.assertIn('download test-testing-dummy', stdout + stderr)
+        stdout, stderr, statuscode = cli.run(['-t', 'x86-linux-native', 'outdated'], cwd=path)
+        self.assertNotEqual(statuscode, 0)
+        self.assertIn('test-testing-dummy', stdout + stderr)
 
         util.rmRf(path)
 
-    def test_updateExplicit(self):
-        path = util.writeTestFiles(Test_Outdated, True)
-
-        stdout, stderr, statuscode = cli.run(['-t', 'x86-linux-native', 'update', 'test-testing-dummy'], cwd=path)
-        self.assertEqual(statuscode, 0)
-        self.assertIn('download test-testing-dummy', stdout + stderr)
-
-        util.rmRf(path)
-
-    def test_updateNothing(self):
+    def test_notOutdated(self):
         path = util.writeTestFiles(Test_Outdated, True)
 
         stdout, stderr, statuscode = cli.run(['-t', 'x86-linux-native', 'up'], cwd=path)
         self.assertEqual(statuscode, 0)
-        self.assertIn('download test-testing-dummy', stdout + stderr)
 
-        stdout, stderr, statuscode = cli.run(['-t', 'x86-linux-native', 'up'], cwd=path)
+        stdout, stderr, statuscode = cli.run(['-t', 'x86-linux-native', 'outdated'], cwd=path)
         self.assertEqual(statuscode, 0)
-        self.assertNotIn('download test-testing-dummy', stdout + stderr)
+        self.assertNotIn('test-testing-dummy', stdout + stderr)
 
         util.rmRf(path)

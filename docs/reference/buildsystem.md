@@ -17,8 +17,29 @@ using [CMake](http://cmake.org).
 yotta makes some useful information available to the modules being compiled, which
 can be embedded in the built binary or otherwise used at compile time. The
 majority of this information is defined by yotta's [configuration
-system](/reference/config.html), but if the yotta build information header is
-included, then you can also access other information:
+system](/reference/config.html), but some other information is also available.
+
+### Information Always Available
+The name of the library being built by the current module is available as
+`YOTTA_MODULE_NAME`, as if it were defined:
+
+```
+#define YOTTA_MODULE_NAME modulename-unquoted
+```
+
+No header needs to be included for this definition to be available.
+
+Use the [preprocessor stringification
+trick](https://gcc.gnu.org/onlinedocs/cpp/Stringizing.html) to get the
+module name as a string, if desired. Note that this definition is **not**
+currently available when compiling tests, and there are other circumstances
+where using custom CMake can make it unavailable.
+
+
+### Information Available in the Build Info Header
+If the yotta build information header is included, then you can also access
+other information. Note that this header changes with every build (as it
+includes a build timestamp and unique ID), so do not include it unnecessarily.
 
 To include the yotta build information header:
 
@@ -44,6 +65,7 @@ built, then the following will also be defined in this header:
 ```C
 #define YOTTA_BUILD_VCS_ID 0123456789abcdef // git or mercurial hash, variable length up to 40 characters
 #define YOTTA_BUILD_VCS_CLEAN 1             // 1 if there were no uncommitted changes, else 0
+#define YOTTA_BUILD_VCS_DESCRIPTION v0.5-57-gad36348 // git describe or mercurial equivalent
 ```
 
 Corresponding definitions for all of the build information are always available

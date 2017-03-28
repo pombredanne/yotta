@@ -7,22 +7,18 @@
 import argparse
 import logging
 import os
-import re
 
 # Component, , represents an installed component, internal
-from .lib import component
+from yotta.lib import component
 # access, , get components, internal
-from .lib import access
+from yotta.lib import access
 # access, , get components, internal
-from .lib import access_common
+from yotta.lib import access_common
 
 # folders, , get places to install things, internal
-from .lib import folders
+from yotta.lib import folders
 # --config option, , , internal
-from . import options
-
-GitHub_Ref_RE = re.compile('[a-zA-Z0-9-]*/([a-zA-Z0-9-]*)')
-
+from yotta import options
 
 def addOptions(parser):
     options.config.addTo(parser)
@@ -65,27 +61,49 @@ def execCommand(args, following_args):
     else:
         return installComponent(args)
 
-def checkPrintStatus(errors, components):
+def checkPrintStatus(errors, components, top_component, target):
     status = 0
     for error in errors:
         logging.error(error)
         status = 1
-    for c in components.values():
+    for c in list(components.values()) + [top_component]:
         if c and c.getError():
             logging.error('%s %s', c.getName(), c.getError())
             status = 1
+    leaf_target = None
+    if target and target.hierarchy:
+        for t in target.hierarchy:
+            if not leaf_target:
+                leaf_target = t
+            if t and t.getError():
+                if t is leaf_target:
+                    logging.error('target %s %s', t.getName(), t.getError())
+                else:
+                    logging.error('base target %s of %s %s', t.getName(), leaf_target.getName(), t.getError())
+                status = 1
     return status
 
 
 def installDeps(args, current_component):
+    # settings, , load and save settings, internal
+    from yotta.lib import settings
+
     logging.debug('install deps for %s' % current_component)
     if not current_component:
         logging.debug(str(current_component.getError()))
         logging.error('The current directory does not contain a valid module.')
         return 1
-    if not args.target:
-        logging.error('No target has been set, use "yotta target" to set one.')
-        return 1
+    # warn if the target hasn't been explicitly specified when running a build:
+    # this is likely user-error
+    if not settings.getProperty('build', 'targetSetExplicitly') and not \
+        getattr(args, '_target_set_explicitly', False):
+        logging.warning(
+            'The build target has not been set, so the default (%s) is being ' +
+            'used. You can use `yotta target <targetname>` to set the build ' +
+            'target. See http://yottadocs.mbed.com/tutorial/targets.html for '
+            'more information on using targets.',
+            args.target
+        )
     target, errors = current_component.satisfyTarget(args.target, additional_config=args.config)
     if errors:
         for error in errors:
@@ -107,7 +125,7 @@ def installDeps(args, current_component):
             available_components = [(current_component.getName(), current_component)],
                             test = {'own':'toplevel', 'all':True, 'none':False}[args.install_test_deps]
         )
-        return checkPrintStatus(errors, components)
+        return checkPrintStatus(errors, components, current_component, target)
 
 
 
@@ -123,20 +141,16 @@ def installComponentAsDependency(args, current_component):
             logging.error(error)
         return 1
     modules_dir = current_component.modulesPath()
-    #!!! FIXME: non-registry component spec support (see also installComponent
-    # below), for these the original source should be included in the version
-    # spec, too
-    github_ref_match = GitHub_Ref_RE.match(args.component)
+
+    from yotta.lib import sourceparse
+    # check if we have both a name and specification
+    component_name, component_spec = sourceparse.parseModuleNameAndSpec(args.component)
+    logging.info('%s, %s', component_name, component_spec)
+
+    if component_name == current_component.getName():
+        logging.error('will not install module %s as a dependency of itself', component_name)
+        return -1
     try:
-        if github_ref_match:
-            component_name = github_ref_match.group(1)
-            component_spec = args.component
-        else:
-            component_name = args.component
-            component_spec = '*'
-        if component_name == current_component.getName():
-            logging.error('will not install module %s as a dependency of itself', component_name)
-            return -1
         installed = access.satisfyVersion(
                 component_name,
                 component_spec,
@@ -144,7 +158,7 @@ def installComponentAsDependency(args, current_component):
                   search_paths = [modules_dir],
              working_directory = modules_dir
         )
-    except access_common.Unavailable as e:
+    except access_common.AccessException as e:
         logging.error(e)
         return 1
 
@@ -168,36 +182,26 @@ def installComponentAsDependency(args, current_component):
                         test = {'own':'toplevel', 'all':True, 'none':False}[args.install_test_deps]
 
     )
-    return checkPrintStatus(errors, components)
+    return checkPrintStatus(errors, components, current_component, target)
 
 
 def installComponent(args):
     path = folders.globalInstallDirectory() if args.act_globally else os.getcwd()
     logging.debug('install component %s to %s' % (args.component, path))
 
-    # !!! FIXME: should support other URL specs, spec matching should be in
-    # access module
-    github_ref_match = GitHub_Ref_RE.match(args.component)
+    from yotta.lib import sourceparse
+    # check if we have both a name and specification
+    component_name, component_spec = sourceparse.parseModuleNameAndSpec(args.component)
+
     try:
-        if github_ref_match:
-            component_name = github_ref_match.group(1)
-            access.satisfyVersion(
-                      component_name,
-                      args.component,
-                           available = dict(),
-                        search_paths = [path],
-                   working_directory = path
-            )
-        else:
-            component_name = args.component
-            access.satisfyVersion(
-                      component_name,
-                                 '*',
-                           available = dict(),
-                        search_paths = [path],
-                   working_directory = path
-            )
-    except access_common.Unavailable as e:
+        access.satisfyVersion(
+                  component_name,
+                  component_spec,
+                       available = dict(),
+                    search_paths = [path],
+               working_directory = path
+        )
+    except access_common.AccessException as e:
         logging.error('%s', e)
         return 1
     os.chdir(component_name)

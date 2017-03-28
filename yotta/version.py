@@ -9,13 +9,13 @@ import logging
 import os
 
 # version, , represent versions and specifications, internal
-from .lib import version
+from yotta.lib import version
 # Component, , represents an installed component, internal
-from .lib import component
+from yotta.lib import component
 # Target, , represents an installed target, internal
-from .lib import target
+from yotta.lib import target
 # vcs, , represent version controlled directories, internal
-from .lib import vcs
+from yotta.lib import vcs
 
 def addOptions(parser):
     def patchType(s):
@@ -37,7 +37,8 @@ def execCommand(args, following_args):
     t = None if c else target.Target(wd)
     if not (c or t):
         logging.debug(str(c.getError()))
-        logging.debug(str(t.getError()))
+        if t:
+            logging.debug(str(t.getError()))
         logging.error('The current directory does not contain a valid module or target.')
         return 1
     else:
@@ -51,14 +52,27 @@ def execCommand(args, following_args):
                 return 1
 
             v = p.getVersion()
+            pre_script_env = {
+                'YOTTA_OLD_VERSION':str(v)
+            }
             if args.action in ('major', 'minor', 'patch'):
                 v.bump(args.action)
             else:
                 v = args.action
+
+            pre_script_env['YOTTA_NEW_VERSION'] =str(v)
+            errcode = p.runScript('preVersion', pre_script_env)
+            if errcode:
+                return errcode
+
             logging.info('@%s' % v)
             p.setVersion(v)
 
             p.writeDescription()
+
+            errcode = p.runScript('postVersion')
+            if errcode:
+                return errcode
 
             p.commitVCS(tag='v'+str(v))
         except vcs.VCSError as e:

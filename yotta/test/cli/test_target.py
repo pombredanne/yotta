@@ -13,7 +13,7 @@ import stat
 
 # internal modules:
 from yotta.lib.fsutils import rmRf
-from . import cli
+from yotta.test.cli import cli
 
 
 Test_Module_JSON = '''{
@@ -72,6 +72,12 @@ class TestCLITarget(unittest.TestCase):
             self.assertFalse(
                 os.stat(os.path.join(self.test_dir, '.yotta.json')).st_mode & Check_Not_Stat
             )
+
+    def test_setNonexistentTarget(self):
+        stdout, stderr, statuscode = cli.run(['target', 'thisdoesnotexist'], cwd=self.test_dir)
+        self.assertNotEqual(statuscode, 0)
+        self.assertNotIn('Exception', stdout+stderr)
+        self.assertIn('does not exist in the targets registry', stdout+stderr)
 
     def runCheckCommand(self, args):
         stdout, stderr, statuscode = cli.run(args, cwd=self.test_dir)

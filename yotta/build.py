@@ -9,17 +9,17 @@ import logging
 
 
 # validate, , validate things, internal
-from .lib import validate
+from yotta.lib import validate
 # access_common, , things shared between different component access modules, internal
-from .lib import access_common
+from yotta.lib import access_common
 # CMakeGen, , generate build files, internal
-from .lib import cmakegen
+from yotta.lib import cmakegen
 # Target, , represents an installed target, internal
-from .lib import target
+from yotta.lib import target
 # install, , install subcommand, internal
-from . import install
+from yotta import install
 # --config option, , , internal
-from . import options
+from yotta import options
 
 def addOptions(parser, add_build_targets=True):
     options.config.addTo(parser)
@@ -45,6 +45,10 @@ def addOptions(parser, add_build_targets=True):
 def execCommand(args, following_args):
     status = installAndBuild(args, following_args)
     return status['status']
+
+def runScriptWithModules(module, sub_modules, script, script_environment):
+    module.runScript(script, script_environment)
+    [mod.runScript(script, script_environment) for mod in sub_modules if mod]
 
 def installAndBuild(args, following_args):
     ''' Perform the build command, but provide detailed error information.
@@ -99,7 +103,7 @@ def installAndBuild(args, following_args):
 
     builddir = os.path.join(cwd, 'build', target.getName())
 
-    all_components = c.getDependenciesRecursive(
+    all_deps = c.getDependenciesRecursive(
                       target = target,
         available_components = [(c.getName(), c)],
                         test = True
@@ -107,7 +111,7 @@ def installAndBuild(args, following_args):
 
     # if a dependency is missing the build will almost certainly fail, so don't try
     missing = 0
-    for d in all_components.values():
+    for d in all_deps.values():
         if not d and not (d.isTestDependency() and args.install_test_deps != 'all'):
             logging.error('%s not available' % os.path.split(d.path)[1])
             missing += 1
@@ -116,19 +120,44 @@ def installAndBuild(args, following_args):
         return {'status': 1, 'install_status':install_status, 'missing_status':missing}
 
     generator = cmakegen.CMakeGen(builddir, target)
+    # only pass available dependencies to
+    config = generator.configure(c, all_deps)
+    logging.debug("config done, merged config: %s", config['merged_config_json'])
+
+    script_environment = {
+        'YOTTA_MERGED_CONFIG_FILE': config['merged_config_json']
+    }
+    # run pre-generate scripts for all components:
+    runScriptWithModules(c, all_deps.values(), 'preGenerate', script_environment)
+
     app = c if len(c.getBinaries()) else None
-    for error in generator.generateRecursive(c, all_components, builddir, application=app):
+    for error in generator.generateRecursive(c, all_deps, builddir, application=app):
         logging.error(error)
         generate_status = 1
+
+    logging.debug("generate done.")
+    # run pre-build scripts for all components:
+    runScriptWithModules(c, all_deps.values(), 'preBuild', script_environment)
 
     if (not hasattr(args, 'generate_only')) or (not args.generate_only):
         error = target.build(
                 builddir, c, args, release_build=args.release_build,
                 build_args=following_args, targets=args.build_targets
         )
+
         if error:
             logging.error(error)
             build_status = 1
+        else:
+            # post-build scripts only get run if we were successful:
+            runScriptWithModules(c, all_deps.values(), 'postBuild', script_environment)
+
+        if install_status:
+            logging.warning(
+                "There were also errors installing and resolving dependencies, "+
+                "which may have caused the build failure: see above, or run "+
+                "`yotta install` for details."
+            )
 
     return {
                 'status': build_status or generate_status or install_status,

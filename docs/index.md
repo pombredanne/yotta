@@ -59,7 +59,7 @@ the [required domains](/reference/registry.html#network-access).
 ## <a href="#installing-on-osx" name="installing-on-osx">#</a> Installing On OS X
 To install yotta on OS X you can either use the packaged [yotta.app](https://github.com/ARMmbed/yotta_osx_installer/releases/latest) or install yotta and its dependencies yourself.
 ### <a href="#osx-yotta-app" name="osx-yotta-app">#</a> Using yotta.app
-Download the latest [**OS X yotta.app**](https://github.com/ARMmbed/yotta_osx_installer/releases/latest), and drag yotta.app from the disk image into your applications folder.
+Download the latest [**OS X yotta.app**](https://mbed-media.mbed.com/filer_public/91/56/91567e17-7a78-41ec-a998-4ee38e6274a2/yotta_osx_installer_v004.dmg), and drag yotta.app from the disk image into your applications folder.
 
 When you run yotta.app, a terminal will open where you can use yotta commands.
 
@@ -187,58 +187,23 @@ chmod 755 /usr/local/lib/yotta_modules
 To cross-compile yotta modules for embedded targets, you first need install the
 [`arm-none-eabi-gcc` compiler](https://launchpad.net/gcc-arm-embedded).
 
-On most Linux distributiosn, this can be done by running:
+On most Linux distributions (although not Ubuntu), this can be done by running:
 
 ```sh
 sudo apt-get install gcc-arm-none-eabi
 ```
 
-Unfortunately there is a package name conflict for [Ubuntu 14.04 and
-later](https://launchpad.net/~terry.guo/+archive/ubuntu/gcc-arm-embedded), so
-you need to remove previous versions and update your repositories:
+On Ubuntu it's necessary to use the ARM-maintained [gcc-arm-embedded
+package](https://launchpad.net/gcc-arm-embedded), instead:
 
 ```sh
+# remove the built-in package, if installed:
 sudo apt-get remove binutils-arm-none-eabi gcc-arm-none-eabi
-sudo add-apt-repository ppa:terry.guo/gcc-arm-embedded
+# set up the PPA for the ARM-maintained package:
+sudo add-apt-repository ppa:team-gcc-arm-embedded/ppa
 sudo apt-get update
-```
-
-You can now choose to pin the PPA repository or be explicit about the version
-to install, ensuring the correct package is used.
-Pinning the PPA is a little more involved, but is recommended when scripting
-as it will continue to work if the package changes name as versions increase.
-
-Pin the PPA by writing these contents to ```/etc/apt/preferences.d/gcc-arm-none-eabi```
-
-```
-Explanation: get gcc-arm-none-eabi from ppa
-Package: gcc-arm-none-eabi
-Pin: origin "ppa.launchpad.net"
-Pin-Priority: 1001
-```
-
-e.g.
-
-```sh
-sudo echo -e "Explanation: get gcc-arm-none-eabi from ppa\nPackage: gcc-arm-none-eabi\nPin: origin \"ppa.launchpad.net\"\nPin-Priority: 1001" | sudo tee /etc/apt/preferences.d/gcc-arm-none-eabi'
-```
-
-Then install the package as normal:
-
-```
-sudo apt-get install gcc-arm-none-eabi
-```
-
-Alternatively, to install an explicit version of the compiler package for Ubuntu 14.04:
-
-```sh
-sudo apt-get install gcc-arm-none-eabi=4.9.3.2015q3-1trusty1
-```
-
-or for Ubuntu 14.10:
-
-```sh
-sudo apt-get install gcc-arm-none-eabi=4.9.3.2015q2-1utopic1
+# install:
+sudo apt-get install gcc-arm-embedded
 ```
 
 To use this compiler, you'll need to select a supported cross-compilation
@@ -272,14 +237,14 @@ You can also try [installing pip from the Pypy registry](https://pip.pypa.io/en/
 ## <a href="#installing-on-windows" name="installing-on-windows">#</a> Installing on Windows
 To install yotta on windows you can either use the one shot windows installer or install all the dependencies and yotta manually.
 ### <a href="#windows-installer" name="windows-installer">#</a> yotta Windows Installer
- 1. Download the latest [**yotta windows installer**](https://github.com/ARMmbed/yotta_windows_installer/releases/latest).
+ 1. Download the latest [**yotta windows installer**](https://mbed-media.mbed.com/filer_public/2f/0b/2f0b924c-1fac-4907-989b-f2afe3f5785e/yotta_install_v023.exe).
  2. Run the installer. 
  3. Click on `Run Yotta` shortcut on desktop or in start menu to run session with yotta path temporarily pre-pended to system path. 
 
 ### <a href="#manual-windows-installation" name="manual-windows-installation">#</a> Manual Installation
 1. **Install [python](https://www.python.org/downloads/release/python-279/)**. You
     **must** install [python
-    2.7.9](https://www.python.org/downloads/release/python-279/) for yotta to
+    2.7.9 or later](https://www.python.org/downloads/release/python-279/) for yotta to
     work on windows. Select either the [x86-64
     installer](https://www.python.org/ftp/python/2.7.9/python-2.7.9.amd64.msi)
     if you use 64-bit

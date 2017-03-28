@@ -9,12 +9,10 @@ import os
 import threading
 from collections import OrderedDict
 
-# fsutils, , misc filesystem utils, internal
-import fsutils
 # Ordered JSON, , read & write json, internal
-import ordered_json
+from yotta.lib import ordered_json
 # folders, , get places to install things, internal
-import folders
+from yotta.lib import folders
 
 #
 # yotta's settings always written to ~/.yotta/config.json, but are read, in
@@ -68,6 +66,12 @@ class _JSONConfigParser(object):
                 self.configs[fn] = ordered_json.load(fn)
             except IOError:
                 self.configs[fn] = OrderedDict()
+            except Exception as e:
+                self.configs[fn] = OrderedDict()
+                logging.warning(
+                    "Failed to read settings file %s, it will be ignored. The error was: %s",
+                    fn, e
+                )
 
     def get(self, path):
         ''' return a configuration value
@@ -120,15 +124,21 @@ class _JSONConfigParser(object):
         config[path[-1]] = value
 
     def write(self, filename=None):
+        # fsutils, , misc filesystem utils, internal
+        from yotta.lib import fsutils
         if filename is None:
             filename, data = self._firstConfig()
         elif filename in self.configs:
             data = self.configs[filename]
         else:
             raise ValueError('No such file.')
-        dirname = os.path.dirname(filename)
-        fsutils.mkDirP(dirname)
-        ordered_json.dump(filename, data)
+        dirname = os.path.normpath(os.path.dirname(filename))
+        logging.debug('write settings to "%s" (will ensure directory "%s" exists)', filename, dirname)
+        try:
+            fsutils.mkDirP(dirname)
+            ordered_json.dump(filename, data)
+        except OSError as e:
+            logging.error('Failed to save user settings to %s/%s, please check that the path exists and is writable.', dirname, filename)
 
     def _firstConfig(self):
         for fn, data in self.configs.items():

@@ -10,9 +10,6 @@ import tempfile
 import logging
 import errno
 
-# fsutils, , misc filesystem utils, internal
-import fsutils
-
 git_logger = logging.getLogger('git')
 hg_logger = logging.getLogger('hg')
 
@@ -45,6 +42,8 @@ class VCS(object):
     def remove(self):
         raise NotImplementedError()
     def getCommitId(self):
+        raise NotImplementedError()
+    def getDescription(self):
         raise NotImplementedError()
     def __nonzero__(self):
         raise NotImplementedError()
@@ -107,10 +106,16 @@ class Git(VCS):
                 raise
 
     def remove(self):
+        # fsutils, , misc filesystem utils, internal
+        from yotta.lib import fsutils
         fsutils.rmRf(self.worktree)
 
     def getCommitId(self):
         out, err = self._execCommands([self._gitCmd('rev-parse', 'HEAD')])
+        return out.strip()
+
+    def getDescription(self):
+        out, err = self._execCommands([self._gitCmd('describe', '--always', '--tags')])
         return out.strip()
 
     def workingDirectory(self):
@@ -124,7 +129,7 @@ class Git(VCS):
         out, err = None, None
         for cmd in commands:
             try:
-                child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ)
             except OSError as e:
                 if e.errno == errno.ENOENT:
                     if cmd[0] == 'git':
@@ -234,10 +239,18 @@ class HG(VCS):
         return r
 
     def remove(self):
+        # fsutils, , misc filesystem utils, internal
+        from yotta.lib import fsutils
         fsutils.rmRf(self.worktree)
 
     def getCommitId(self):
         return self.repo.hg_node()
+
+    def getDescription(self):
+        try:
+            return self.repo.hg_command('log', '--rev', '.', '--template', "{latesttag}{sub('^-0-.*', '', '-{latesttagdistance}-m{node|short}')}")
+        except self.hgapi.HgException: # old mercurial doesn't support above command, output short hash, m-prefixed
+            return "m" + self.getCommitId()[:12]
 
     def workingDirectory(self):
         return self.worktree

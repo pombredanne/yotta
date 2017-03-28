@@ -30,12 +30,14 @@ def fixupEclipseProject(builddir, component):
             #	<type>2</type>
             #	<location>/absolute/path/to/source/location>
             #</link>
+            # Note that the path must use forward slashes as separators on
+            # windows.
             sys.stdout.write(
                 '''\t\t<link>
 \t\t\t<name>%s-source</name>
 \t\t\t<type>2</type>
 \t\t\t<location>%s</location>
-\t\t</link>\n''' % (component.getName(), os.path.join(component.path, 'source'))
+\t\t</link>\n''' % (component.getName(), os.path.abspath(os.path.join(component.path, 'source')).replace('\\', '/'))
             )
 
 def fixupNinjaBackslashes(builddir):
@@ -65,7 +67,7 @@ def applyFixupsForFenerator(cmake_generator, builddir, component):
     # arguments are read from a file (@file) instead of the command line, since
     # '\' in @file is interpreted as an escape sequence.
     #!!! FIXME: remove this once http://www.cmake.org/Bug/view.php?id=15278 is fixed!
-    if cmake_generator == "Ninja" and os.name == 'nt':
+    if ('Ninja' in cmake_generator) and os.name == 'nt':
         fixupNinjaBackslashes(builddir)
 
     # both fixups may apply, so don't use elif

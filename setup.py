@@ -30,16 +30,16 @@ else:
 
 setup(
     name = "yotta",
-    version = "0.11.0",
+    version = read("yotta/version.txt").strip(),
     author = "James Crosby",
     author_email = "James.Crosby@arm.com",
     description = ("Re-usable components for embedded software."),
     license = "Apache-2.0",
     keywords = "embedded package module dependency management",
-    url = "about:blank",
+    url = "https://github.com/ARMmbed/yotta",
     packages=find_packages(),
     package_data={
-        'yotta': ['lib/schema/*.json', 'lib/templates/*.txt', 'lib/templates/*.cmake']
+        'yotta': ['version.txt', 'lib/schema/*.json', 'lib/templates/*.txt', 'lib/templates/*.cmake']
     },
     long_description=read('pypi_readme.rst'),
     classifiers=[
@@ -54,6 +54,7 @@ setup(
     install_requires=[
         'semantic_version>=2.3.1,<3',
         'requests[security]>=2.4.3,<3',
+        'certifi>=2016.2.28',
         'PyGithub>=1.25,<2',
         'colorama>=0.3,<0.4',
         'hgapi>=1.7,<2',
@@ -62,10 +63,10 @@ setup(
         'PyJWT>=1.0,<2.0',
         'pathlib>=1.0.1,<1.1',
         'jsonschema>=2.4.0,<3.0',
-        'argcomplete>=0.8.0,<=1.0',
-        'mbed_test_wrapper>=0.0.2,<0.1.0',
+        'argcomplete>=0.8.0,<2.0',
+        'mbed_test_wrapper>=0.0.3,<2.0.0',
         'valinor>=0.0.0,<1.0',
         'intelhex>=2.0,<3.0',
-        'jsonpointer>=1.9,<=2.0'
+        'jsonpointer>=1.9,<2.0'
     ] + platform_deps
 )

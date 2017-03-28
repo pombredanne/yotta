@@ -3,8 +3,8 @@
 # Licensed under the Apache License, Version 2.0
 # See LICENSE file for details.
 
-from .lib import lazyregex #pylint: disable=unused-import
-from .lib import errors #pylint: disable=unused-import
+from yotta.lib import lazyregex #pylint: disable=unused-import
+from yotta.lib import errors #pylint: disable=unused-import
 
 # NOTE: argcomplete must be first!
 # argcomplete, pip install argcomplete, tab-completion for argparse, Apache-2
@@ -23,6 +23,9 @@ if 'COVERAGE_PROCESS_START' in os.environ:
     import coverage
     coverage.process_startup()
 
+# set __version__ using the same file that's read by setup.py when installing:
+with open(os.path.join(os.path.dirname(__file__), 'version.txt')) as _version_f:
+    __version__ = _version_f.read().strip()
 
 def splitList(l, at_value):
     r = [[]]
@@ -33,22 +36,47 @@ def splitList(l, at_value):
             r[-1].append(x)
     return r
 
-# Override the argparse default version action so that we can avoid importing
-# pkg_resources (which is slowww) unless someone has actually asked for the
-# version
-class FastVersionAction(argparse.Action):
-    def __call__(self, parser, args, values, option_string=None):
-        import pkg_resources
-        sys.stdout.write(pkg_resources.require("yotta")[0].version + '\n') #pylint: disable=not-callable
-        sys.exit(0)
+def _handleUnhandledReqestExceptions(fn):
+    import functools
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        # requests, apache2
+        import requests
+        try:
+            return fn(*args, **kwargs)
+        except requests.exceptions.RequestException as e:
+            import logging
+            if e.request is not None:
+                logging.critical('%s %s failed with status %s', e.request.method, e.request.url, e.response.status_code)
+                sys.exit(1)
+            else:
+                raise
+    return wrapped
 
+def _exitSilentlyOnUnhandledPipeError(fn):
+    import functools
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except IOError as e:
+            import errno
+            if e.errno == errno.EPIPE:
+                # unhandled pipe error -> exit silently, but with an error code
+                sys.exit(1)
+            else:
+                raise
+    return wrapped
+
+@_exitSilentlyOnUnhandledPipeError
+@_handleUnhandledReqestExceptions
 def main():
     # standard library modules, , ,
     import logging
     from functools import reduce
 
     # logging setup, , setup the logging system, internal
-    from .lib import logging_setup
+    from yotta.lib import logging_setup
     # options, , common argument parser options, internal
     import yotta.options as options
 
@@ -63,7 +91,7 @@ def main():
     )
     subparser = parser.add_subparsers(dest='subcommand_name', metavar='<subcommand>')
 
-    parser.add_argument('--version', nargs=0, action=FastVersionAction,
+    parser.add_argument('--version', action='version', version=__version__,
         help='display the version'
     )
 
@@ -100,7 +128,8 @@ def main():
     addParser('init', 'init', 'Create a new module.')
     addParser('install', 'install',
         'Add a specific module as a dependency, and download it, or install all '+
-        'dependencies for the current module.'
+        'dependencies for the current module. Use yotta install '+
+        'modulename@version to install a specific version.'
     )
     addParser('build', 'build',
         'Build the current module. Options can be passed to the underlying '+
@@ -115,17 +144,21 @@ def main():
     )
     addParser('version', 'version', 'Bump the module version, or (with no arguments) display the current version.')
     addParser('link', 'link',
-        'Symlink a module to be used in another module. Use "yotta link" '+
-        '(with no arguments) to link the current module globally. Or use '+
-        '"yotta link module-name" To use a module that was previously linked '+
-        'globally in the current module.',
+        'Symlink a module to be used into another module.\n\n'+
+        'Use: "yotta link" in a module to link it globally, then use "yotta '+
+        'link <modulename>" to link it into the module where you want to use '+
+        'it.\n\n'+
+        '"yotta link ../path/to/module" is also supported, which will create '+
+        'the global link and a link into the current module in a single step.',
         'Symlink a module'
     )
     addParser('link-target', 'link_target',
-        'Symlink a target to be used in another module. Use "yotta link-target" '+
-        '(with no arguments) to link the current target globally. Or use '+
-        '"yotta link-target target-name" To use a target that was previously linked '+
-        'globally in the current module.',
+        'Symlink a target to be used into another module.\n\n'+
+        'Use: "yotta link" in a target to link it globally, then use "yotta '+
+        'link-target <targetname>" to link it into the module where you want to use '+
+        'it.\n\n'+
+        '"yotta link ../path/to/target" is also supported, which will create '+
+        'the global link and a link into the current module in a single step.',
         'Symlink a target'
     )
     addParser('update', 'update', 'Update dependencies for the current module, or a specific module.')
@@ -138,7 +171,10 @@ def main():
         '"test" script that will be used to run each test. Modules may also '+
         'define a "testReporter" script, which will be piped the output from '+
         'each test, and may produce a summary.',
-        'Run the tests for the current module on the current target. Requires target support.'
+        'Run the tests for the current module on the current target. Requires target support for cross-compiling targets.'
+    )
+    addParser('start', 'start',
+        'Launch the compiled program (available for executable modules only). Requires target support for cross-compiling targets.'
     )
     addParser('publish', 'publish', 'Publish a module or target to the public registry.')
     addParser('unpublish', 'unpublish', 'Un-publish a recently published module or target.')
@@ -158,6 +194,7 @@ def main():
     addParser('licenses', 'licenses', 'List the licenses of the current module and its dependencies.')
     addParser('clean', 'clean', 'Remove files created by yotta and the build.')
     addParser('config', 'config', 'Display the target configuration info.')
+    addParser('shrinkwrap', 'shrinkwrap', 'Create a yotta-shrinkwrap.json file to freeze dependency versions.')
 
     # short synonyms, subparser.choices is a dictionary, so use update() to
     # merge in the keys from another dictionary
@@ -172,7 +209,8 @@ def main():
      'unlink-target':subparser.choices['remove'],
              'owner':subparser.choices['owners'],
               'lics':subparser.choices['licenses'],
-               'who':subparser.choices['whoami']
+               'who':subparser.choices['whoami'],
+               'run':subparser.choices['start']
     }
     subparser.choices.update(short_commands)
 

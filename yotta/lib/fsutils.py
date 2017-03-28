@@ -31,7 +31,9 @@ def _rmRfNoRetry(path):
     # them, to do this
     def fixPermissions(fn, path, excinfo):
         if os.access(path, os.W_OK):
-            raise
+            # there should always be an active exception when this function is
+            # called, so a bare raise should be safe:
+            raise #pylint: disable=misplaced-bare-raise
         else:
             os.chmod(path, stat.S_IWUSR)
             fn(path)
@@ -87,7 +89,11 @@ def fullySplitPath(path):
     return components
 
 # Some functions are platform-dependent
-_platform_fsutils = __import__("fsutils_win" if os.name == 'nt' else "fsutils_posix", globals(), locals(), ['*'])
+if os.name == 'nt':
+    import yotta.lib.fsutils_win as _platform_fsutils
+else:
+    import yotta.lib.fsutils_posix as _platform_fsutils
+
 isLink        = _platform_fsutils.isLink
 tryReadLink   = _platform_fsutils.tryReadLink
 _symlink      = _platform_fsutils._symlink
